@@ -1,11 +1,11 @@
 /**************************************************************************
-   Copyright (c) 2021 sewenew
+   Copyright (c) 2019
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+	   http://www.apache.org/licenses/LICENSE-2.0
 
    Unless required by applicable law or agreed to in writing, software
    distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,37 +14,36 @@
    limitations under the License.
  *************************************************************************/
 
-#ifndef SEWENEW_REDISPLUSPLUS_CXX_UTILS_H
-#define SEWENEW_REDISPLUSPLUS_CXX_UTILS_H
+#ifndef REDISPLUSPLUS_TEST_REDLOCK_TEST_H
+#define REDISPLUSPLUS_TEST_REDLOCK_TEST_H
 
-#include <string_view>
-#include <type_traits>
-#include <optional>
-#include <variant>
-
-#define REDIS_PLUS_PLUS_HAS_OPTIONAL
-
-#define REDIS_PLUS_PLUS_HAS_VARIANT
+#include <sw/redis++/redis++.h>
+#include <sw/redis++/patterns/redlock.h>
+#include <memory>
 
 namespace sw {
 
 namespace redis {
 
-using StringView = std::string_view;
+namespace test {
 
-template <typename T>
-using Optional = std::optional<T>;
+template <typename RedisInstance>
+class RedLockTest {
+public:
+    explicit RedLockTest(std::shared_ptr<RedisInstance> instance) : _redis(std::move(instance)) {}
 
-template <typename ...Args>
-using Variant = std::variant<Args...>;
+    void run();
 
-using Monostate = std::monostate;
+private:
+    std::shared_ptr<RedisInstance> _redis;
+};
 
-template <typename F, typename ...Args>
-using IsInvocable = std::is_invocable<F, Args...>;
+} // namespace test
 
-}
+} // namespace redis
 
-}
+} // namespace sw
 
-#endif // end SEWENEW_REDISPLUSPLUS_CXX_UTILS_H
+#include "redlock_test.hpp"
+
+#endif // end REDISPLUSPLUS_TEST_REDLOCK_TEST_H

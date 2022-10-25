@@ -1,5 +1,5 @@
 /**************************************************************************
-   Copyright (c) 2017 sewenew
+   Copyright (c) 2022 sewenew
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -14,98 +14,63 @@
    limitations under the License.
  *************************************************************************/
 
-#include "subscriber.h"
-#include <cassert>
+#include "async_subscriber_impl.h"
 
 namespace sw {
 
 namespace redis {
 
-Subscriber::Subscriber(Connection connection) : _connection(std::move(connection)) {
-#ifdef REDIS_PLUS_PLUS_RESP_VERSION_3
-    if (_connection.options().resp > 2) {
-        _connection.set_push_callback(nullptr);
-    }
-#endif
-}
-
-void Subscriber::subscribe(const StringView &channel) {
-    _check_connection();
-
-    // TODO: cmd::subscribe DOES NOT send the subscribe message to Redis.
-    // In fact, it puts the command to network buffer.
-    // So we need a queue to record these sub or unsub commands, and
-    // ensure that before stopping the subscriber, all these commands
-    // have really been sent to Redis.
-    cmd::subscribe(_connection, channel);
-}
-
-void Subscriber::unsubscribe() {
-    _check_connection();
-
-    cmd::unsubscribe(_connection);
-}
-
-void Subscriber::unsubscribe(const StringView &channel) {
-    _check_connection();
-
-    cmd::unsubscribe(_connection, channel);
-}
-
-void Subscriber::psubscribe(const StringView &pattern) {
-    _check_connection();
-
-    cmd::psubscribe(_connection, pattern);
-}
-
-void Subscriber::punsubscribe() {
-    _check_connection();
-
-    cmd::punsubscribe(_connection);
-}
-
-void Subscriber::punsubscribe(const StringView &pattern) {
-    _check_connection();
-
-    cmd::punsubscribe(_connection, pattern);
-}
-
-void Subscriber::consume() {
-    _check_connection();
-
-    ReplyUPtr reply;
+void AsyncSubscriberImpl::consume(redisReply *reply) {
     try {
-        reply = _connection.recv();
-    } catch (const TimeoutError &) {
-        _connection.reset();
-        throw;
+        if (reply == nullptr) {
+            // Connection has been closed.
+            _run_err_callback(std::make_exception_ptr(Error("connection has been closed")));
+        } else if (reply::is_error(*reply)) {
+            try {
+                throw_error(*reply);
+            } catch (const TimeoutError &) {
+                // TODO: need to reset connection and run err callback
+            } catch (const Error &) {
+                _run_err_callback(std::current_exception());
+            }
+        } else {
+            _run_callback(*reply);
+        }
+    } catch (...) {
+        _run_err_callback(std::current_exception());
     }
+}
 
-    assert(reply);
+void AsyncSubscriberImpl::_run_err_callback(std::exception_ptr err) {
+    if (_err_callback) {
+        _err_callback(err);
+    }
+}
 
+void AsyncSubscriberImpl::_run_callback(redisReply &reply) {
 #ifdef REDIS_PLUS_PLUS_RESP_VERSION_3
-    if (!(reply::is_push(*reply) || reply::is_array(*reply)) || reply->elements < 1 || reply->element == nullptr) {
+    if (!(reply::is_array(reply) || reply::is_push(reply)) || reply.elements < 1 || reply.element == nullptr) {
 #else
-    if (!reply::is_array(*reply) || reply->elements < 1 || reply->element == nullptr) {
+    if (!reply::is_array(reply) || reply.elements < 1 || reply.element == nullptr) {
 #endif
         throw ProtoError("Invalid subscribe message");
     }
 
-    auto type = _msg_type(reply->element[0]);
+    auto type = _msg_type(reply.element[0]);
     switch (type) {
-    case MsgType::MESSAGE:
-        _handle_message(*reply);
+    case Subscriber::MsgType::MESSAGE:
+        _handle_message(reply);
         break;
 
-    case MsgType::PMESSAGE:
-        _handle_pmessage(*reply);
+    case Subscriber::MsgType::PMESSAGE:
+        _handle_pmessage(reply);
         break;
 
-    case MsgType::SUBSCRIBE:
-    case MsgType::UNSUBSCRIBE:
-    case MsgType::PSUBSCRIBE:
-    case MsgType::PUNSUBSCRIBE:
-        _handle_meta(type, *reply);
+    case Subscriber::MsgType::SUBSCRIBE:
+    case Subscriber::MsgType::UNSUBSCRIBE:
+    case Subscriber::MsgType::PSUBSCRIBE:
+    case Subscriber::MsgType::PUNSUBSCRIBE:
+        _handle_meta(type, reply);
         break;
 
     default:
@@ -113,7 +78,7 @@ void Subscriber::consume() {
     }
 }
 
-Subscriber::MsgType Subscriber::_msg_type(redisReply *reply) const {
+Subscriber::MsgType AsyncSubscriberImpl::_msg_type(redisReply *reply) const {
     if (reply == nullptr) {
         throw ProtoError("Null type reply.");
     }
@@ -121,33 +86,26 @@ Subscriber::MsgType Subscriber::_msg_type(redisReply *reply) const {
     return _msg_type(reply::parse<std::string>(*reply));
 }
 
-Subscriber::MsgType Subscriber::_msg_type(std::string const& type) const
-{
+Subscriber::MsgType AsyncSubscriberImpl::_msg_type(const std::string &type) const {
     if ("message" == type) {
-        return MsgType::MESSAGE;
+        return Subscriber::MsgType::MESSAGE;
     } else if ("pmessage" == type) {
-        return MsgType::PMESSAGE;
+        return Subscriber::MsgType::PMESSAGE;
     } else if ("subscribe" == type) {
-        return MsgType::SUBSCRIBE;
+        return Subscriber::MsgType::SUBSCRIBE;
     } else if ("unsubscribe" == type) {
-        return MsgType::UNSUBSCRIBE;
+        return Subscriber::MsgType::UNSUBSCRIBE;
     } else if ("psubscribe" == type) {
-        return MsgType::PSUBSCRIBE;
+        return Subscriber::MsgType::PSUBSCRIBE;
     } else if ("punsubscribe" == type) {
-        return MsgType::PUNSUBSCRIBE;
+        return Subscriber::MsgType::PUNSUBSCRIBE;
     }
 
     throw ProtoError("Invalid message type.");
-    return MsgType::MESSAGE; // Silence "no return" warnings.
+    return Subscriber::MsgType::MESSAGE; // Silence "no return" warnings.
 }
 
-void Subscriber::_check_connection() {
-    if (_connection.broken()) {
-        throw Error("Connection is broken");
-    }
-}
-
-void Subscriber::_handle_message(redisReply &reply) {
+void AsyncSubscriberImpl::_handle_message(redisReply &reply) {
     if (_msg_callback == nullptr) {
         return;
     }
@@ -173,7 +131,7 @@ void Subscriber::_handle_message(redisReply &reply) {
     _msg_callback(std::move(channel), std::move(msg));
 }
 
-void Subscriber::_handle_pmessage(redisReply &reply) {
+void AsyncSubscriberImpl::_handle_pmessage(redisReply &reply) {
     if (_pmsg_callback == nullptr) {
         return;
     }
@@ -205,7 +163,7 @@ void Subscriber::_handle_pmessage(redisReply &reply) {
     _pmsg_callback(std::move(pattern), std::move(channel), std::move(msg));
 }
 
-void Subscriber::_handle_meta(MsgType type, redisReply &reply) {
+void AsyncSubscriberImpl::_handle_meta(Subscriber::MsgType type, redisReply &reply) {
     if (_meta_callback == nullptr) {
         return;
     }

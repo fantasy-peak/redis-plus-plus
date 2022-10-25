@@ -43,6 +43,10 @@ inline void auth(Connection &connection, const StringView &user, const StringVie
                     password.data(), password.size());
 }
 
+inline void hello(Connection &connection, long long version) {
+    connection.send("HELLO %lld", version);
+}
+
 inline void echo(Connection &connection, const StringView &msg) {
     connection.send("ECHO %b", msg.data(), msg.size());
 }
@@ -414,6 +418,12 @@ void set(Connection &connection,
             const StringView &key,
             const StringView &val,
             long long ttl,
+            UpdateType type);
+
+void set_keepttl(Connection &connection,
+            const StringView &key,
+            const StringView &val,
+            bool keepttl,
             UpdateType type);
 
 inline void setex(Connection &connection,
@@ -2061,7 +2071,17 @@ inline void xrevrange_count(Connection &connection,
                     count);
 }
 
-void xtrim(Connection &connection, const StringView &key, long long count, bool approx);
+void xtrim(Connection &connection, const StringView &key, long long threshold,
+        bool approx, XtrimStrategy strategy);
+
+void xtrim_limit(Connection &connection, const StringView &key, long long threshold,
+        XtrimStrategy strategy, long long limit);
+
+void xtrim_string_threshold(Connection &connection, const StringView &key,
+        const StringView &threshold, bool approx, XtrimStrategy strategy);
+
+void xtrim_string_threshold_limit(Connection &connection, const StringView &key,
+        const StringView &threshold, XtrimStrategy strategy, long long limit);
 
 namespace detail {
 
@@ -2170,6 +2190,17 @@ void set_georadius_parameters(CmdArgs &args,
                                 bool with_coord,
                                 bool with_dist,
                                 bool with_hash);
+
+void set_xtrim_parameters(CmdArgs &args,
+        XtrimStrategy strategy,
+        bool approx,
+        const StringView &threshold);
+
+void set_xtrim_parameters(CmdArgs &args,
+        XtrimStrategy strategy,
+        bool approx,
+        const StringView &threshold,
+        long long limit);
 
 }
 

@@ -20,9 +20,49 @@
 #include "async_shards_pool.h"
 #include "cmd_formatter.h"
 
+#ifdef _MSC_VER
+
+#include <winsock2.h>   // for `timeval` with MSVC compiler
+
+#endif
+
 namespace {
 
 using namespace sw::redis;
+
+// TODO: hello_callback is almost the same as set_options_callback.
+void hello_callback(redisAsyncContext *ctx, void *r, void *) {
+    assert(ctx != nullptr);
+
+    auto *context = static_cast<AsyncContext *>(ctx->data);
+    assert(context != nullptr);
+
+    auto &connection = context->connection;
+    assert(connection);
+
+    redisReply *reply = static_cast<redisReply *>(r);
+    if (reply == nullptr) {
+        // Connection has bee closed.
+        // TODO: not sure if we should set this to be State::BROKEN
+        return;
+    }
+
+    try {
+        if (reply::is_error(*reply)) {
+            throw_error(*reply);
+        }
+
+        // TODO: parse HELLO reply
+        //reply::parse<HELLO>(*reply);
+    } catch (const Error &e) {
+        // TODO: disconnect and connect_callback might throw
+        connection->disconnect(std::make_exception_ptr(e));
+
+        return;
+    }
+
+    connection->connect_callback();
+}
 
 void set_options_callback(redisAsyncContext *ctx, void *r, void *) {
     assert(ctx != nullptr);
@@ -54,6 +94,16 @@ void set_options_callback(redisAsyncContext *ctx, void *r, void *) {
     }
 
     connection->connect_callback();
+}
+
+timeval to_timeval(const std::chrono::milliseconds &dur) {
+    auto sec = std::chrono::duration_cast<std::chrono::seconds>(dur);
+    auto msec = std::chrono::duration_cast<std::chrono::microseconds>(dur - sec);
+
+    timeval t;
+    t.tv_sec = sec.count();
+    t.tv_usec = msec.count();
+    return t;
 }
 
 }
@@ -139,6 +189,10 @@ void AsyncConnection::connect_callback(std::exception_ptr err) {
             _connecting_callback();
             break;
 
+        case State::SET_RESP:
+            _set_resp_callback();
+            break;
+
         case State::AUTHING:
             _authing_callback();
             break;
@@ -184,6 +238,14 @@ void AsyncConnection::update_node_info(const std::string &host, int port) {
     _opts.port = port;
 }
 
+#ifdef REDIS_PLUS_PLUS_RESP_VERSION_3
+
+void AsyncConnection::set_push_callback(redisAsyncPushFn *push_func) {
+    redisAsyncSetPushCallback(_ctx, push_func);
+}
+
+#endif
+
 void AsyncConnection::_disable_disconnect_callback() {
     assert(_ctx != nullptr);
 
@@ -200,16 +262,15 @@ void AsyncConnection::_send() {
     for (auto idx = 0U; idx != events.size(); ++idx) {
         auto &event = events[idx];
         try {
-            event->handle(ctx);
-
-            // CommandEvent::_reply_callback will release the memory.
-            event.release();
+            if (event->handle(ctx)) {
+                // CommandEvent::_reply_callback will release the memory.
+                event.release();
+            }
         } catch (...) {
             // Failed to send command, fail subsequent events.
             auto err = std::current_exception();
             for (; idx != events.size(); ++idx) {
-                auto &event = events[idx];
-                event->set_exception(err);
+                events[idx]->set_exception(err);
             }
 
             disconnect(err);
@@ -255,6 +316,20 @@ void AsyncConnection::_fail_events(std::exception_ptr err) {
 }
 
 void AsyncConnection::_connecting_callback() {
+    if (_need_set_resp()) {
+        _set_resp();
+    } else if (_need_auth()) {
+        _auth();
+    } else if (_need_select_db()) {
+        _select_db();
+    } else if (_need_enable_readonly()) {
+        _enable_readonly();
+    } else {
+        _set_ready();
+    }
+}
+
+void AsyncConnection::_set_resp_callback() {
     if (_need_auth()) {
         _auth();
     } else if (_need_select_db()) {
@@ -282,6 +357,17 @@ void AsyncConnection::_select_db_callback() {
     } else {
         _set_ready();
     }
+}
+
+void AsyncConnection::_set_resp() {
+    assert(!broken());
+
+    if (redisAsyncCommand(_ctx, hello_callback, nullptr, "HELLO %d",
+            _opts.resp) != REDIS_OK) {
+        throw Error("failed to send hello command");
+    }
+
+    _state = State::SET_RESP;
 }
 
 void AsyncConnection::_auth() {
@@ -368,10 +454,20 @@ void AsyncConnection::_connect() {
         _tls_ctx = std::move(tls_ctx);
         _ctx = ctx.release();
 
+#ifdef REDIS_PLUS_PLUS_RESP_VERSION_3
+        if (_subscriber_impl && opts.resp > 2) {
+            set_push_callback(nullptr);
+        }
+#endif
+
         _state = State::CONNECTING;
     } catch (const Error &err) {
         _fail_events(std::current_exception());
     }
+}
+
+bool AsyncConnection::_need_set_resp() const {
+    return _opts.resp > 2;
 }
 
 bool AsyncConnection::_need_auth() const {
@@ -395,14 +491,31 @@ void AsyncConnection::_clean_async_context(void *data) {
 }
 
 AsyncConnection::AsyncContextUPtr AsyncConnection::_connect(const ConnectionOptions &opts) {
-    redisAsyncContext *context = nullptr;
+    redisOptions redis_opts;
+    // GCC 4.8 doesn't support zero initializer for C struct. Damn it!
+    std::memset(&redis_opts, 0, sizeof(redis_opts));
+
+    timeval connect_timeout;
+    if (opts.connect_timeout > std::chrono::milliseconds(0)) {
+        connect_timeout = to_timeval(opts.connect_timeout);
+        redis_opts.connect_timeout = &connect_timeout;
+    }
+    timeval socket_timeout;
+    if (opts.socket_timeout > std::chrono::milliseconds(0)) {
+        socket_timeout = to_timeval(opts.socket_timeout);
+        redis_opts.command_timeout = &socket_timeout;
+    }
+
     switch (opts.type) {
     case ConnectionType::TCP:
-        context = redisAsyncConnect(opts.host.c_str(), opts.port);
+        redis_opts.type = REDIS_CONN_TCP;
+        redis_opts.endpoint.tcp.ip = opts.host.c_str();
+        redis_opts.endpoint.tcp.port = opts.port;
         break;
 
     case ConnectionType::UNIX:
-        context = redisAsyncConnectUnix(opts.path.c_str());
+        redis_opts.type = REDIS_CONN_UNIX;
+        redis_opts.endpoint.unix_socket = opts.path.c_str();
         break;
 
     default:
@@ -410,6 +523,7 @@ AsyncConnection::AsyncContextUPtr AsyncConnection::_connect(const ConnectionOpti
         throw Error("Unknown connection type");
     }
 
+    auto *context = redisAsyncConnectWithOptions(&redis_opts);
     if (context == nullptr) {
         throw Error("Failed to allocate memory for connection.");
     }

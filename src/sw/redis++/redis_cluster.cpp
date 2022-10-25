@@ -259,9 +259,16 @@ bool RedisCluster::set(const StringView &key,
                     UpdateType type) {
     auto reply = command(cmd::set, key, val, ttl.count(), type);
 
-    reply::rewrite_set_reply(*reply);
+    return reply::parse_set_reply(*reply);
+}
 
-    return reply::parse<bool>(*reply);
+bool RedisCluster::set(const StringView &key,
+                    const StringView &val,
+                    bool keepttl,
+                    UpdateType type) {
+    auto reply = command(cmd::set_keepttl, key, val, keepttl, type);
+
+    return reply::parse_set_reply(*reply);
 }
 
 void RedisCluster::setex(const StringView &key,
@@ -780,8 +787,30 @@ long long RedisCluster::xlen(const StringView &key) {
     return reply::parse<long long>(*reply);
 }
 
-long long RedisCluster::xtrim(const StringView &key, long long count, bool approx) {
-    auto reply = command(cmd::xtrim, key, count, approx);
+long long RedisCluster::xtrim(const StringView &key, long long threshold, bool approx,
+        XtrimStrategy strategy) {
+    auto reply = command(cmd::xtrim, key, threshold, approx, strategy);
+
+    return reply::parse<long long>(*reply);
+}
+
+long long RedisCluster::xtrim(const StringView &key, long long threshold,
+        XtrimStrategy strategy, long long limit) {
+    auto reply = command(cmd::xtrim_limit, key, threshold, strategy, limit);
+
+    return reply::parse<long long>(*reply);
+}
+
+long long RedisCluster::xtrim(const StringView &key, const StringView &threshold, bool approx,
+        XtrimStrategy strategy) {
+    auto reply = command(cmd::xtrim_string_threshold, key, threshold, approx, strategy);
+
+    return reply::parse<long long>(*reply);
+}
+
+long long RedisCluster::xtrim(const StringView &key, const StringView &threshold,
+        XtrimStrategy strategy, long long limit) {
+    auto reply = command(cmd::xtrim_string_threshold_limit, key, threshold, strategy, limit);
 
     return reply::parse<long long>(*reply);
 }

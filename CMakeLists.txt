@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.1)
 
-set(REDIS_PLUS_PLUS_VERSION "1.3.3")
+set(REDIS_PLUS_PLUS_VERSION "1.3.5")
 message(STATUS "redis-plus-plus version: ${REDIS_PLUS_PLUS_VERSION}")
 
 project(redis++ LANGUAGES CXX VERSION ${REDIS_PLUS_PLUS_VERSION})
@@ -41,6 +41,14 @@ if(REDIS_PLUS_PLUS_BUILD_ASYNC)
     endif()
 endif()
 
+if(REDIS_PLUS_PLUS_BUILD_CORO)
+    if(NOT REDIS_PLUS_PLUS_BUILD_ASYNC)
+        message(FATAL_ERROR "In order to build coroutine support, you must set REDIS_PLUS_PLUS_BUILD_ASYNC")
+    endif()
+
+    message(STATUS "redis-plus-plus build coroutine support: " ${REDIS_PLUS_PLUS_BUILD_CORO})
+endif()
+
 set(REDIS_PLUS_PLUS_SOURCE_DIR src/sw/redis++)
 
 set(REDIS_PLUS_PLUS_SOURCES
@@ -61,6 +69,11 @@ set(REDIS_PLUS_PLUS_SOURCES
         "${REDIS_PLUS_PLUS_SOURCE_DIR}/transaction.cpp"
 )
 
+set(PATTERNS_DIR "${REDIS_PLUS_PLUS_SOURCE_DIR}/patterns")
+
+list(APPEND REDIS_PLUS_PLUS_SOURCES
+        "${PATTERNS_DIR}/redlock.cpp")
+
 if(REDIS_PLUS_PLUS_BUILD_ASYNC)
     list(APPEND REDIS_PLUS_PLUS_SOURCES
         "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_connection.cpp"
@@ -70,6 +83,8 @@ if(REDIS_PLUS_PLUS_BUILD_ASYNC)
         "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_sentinel.cpp"
         "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_redis_cluster.cpp"
         "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_shards_pool.cpp"
+        "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_subscriber.cpp"
+        "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_subscriber_impl.cpp"
     )
 
     if(NOT REDIS_PLUS_PLUS_ASYNC_FUTURE)
@@ -117,6 +132,8 @@ if(hiredis_FOUND)
     if(REDIS_PLUS_PLUS_USE_TLS)
         find_package(hiredis_ssl REQUIRED)
         list(APPEND REDIS_PLUS_PLUS_HIREDIS_LIBS hiredis::hiredis_ssl)
+        find_package(OpenSSL REQUIRED)
+        list(APPEND REDIS_PLUS_PLUS_HIREDIS_LIBS ${OPENSSL_LIBRARIES})
     endif()
 else()
     find_path(HIREDIS_HEADER hiredis)
@@ -126,6 +143,8 @@ else()
     if(REDIS_PLUS_PLUS_USE_TLS)
         find_library(HIREDIS_TLS_LIB hiredis_ssl)
         list(APPEND REDIS_PLUS_PLUS_HIREDIS_LIBS ${HIREDIS_TLS_LIB})
+        find_package(OpenSSL REQUIRED)
+        list(APPEND REDIS_PLUS_PLUS_HIREDIS_LIBS ${OPENSSL_LIBRARIES})
     endif()
 endif()
 
@@ -136,6 +155,20 @@ message(STATUS "redis-plus-plus build static library: ${REDIS_PLUS_PLUS_BUILD_ST
 if(REDIS_PLUS_PLUS_BUILD_STATIC)
     set(STATIC_LIB redis++_static)
 
+    # For the static build, link to the static version of hiredis
+    set(REDIS_PLUS_PLUS_HIREDIS_LIBS_STATIC ${REDIS_PLUS_PLUS_HIREDIS_LIBS})
+
+    if (TARGET hiredis::hiredis_static)
+      string(REPLACE "hiredis::hiredis" "hiredis::hiredis_static" REDIS_PLUS_PLUS_HIREDIS_LIBS_STATIC
+        "${REDIS_PLUS_PLUS_HIREDIS_LIBS_STATIC}")
+    endif()
+
+    if (TARGET hiredis::hiredis_ssl_static)
+      # If SSL is not enabled, this line will have no effect
+      string(REPLACE "hiredis::hiredis_ssl" "hiredis::hiredis_ssl_static" REDIS_PLUS_PLUS_HIREDIS_LIBS_STATIC
+        "${REDIS_PLUS_PLUS_HIREDIS_LIBS_STATIC}")
+    endif()
+
     add_library(${STATIC_LIB} STATIC ${REDIS_PLUS_PLUS_SOURCES})
     add_library(redis++::${STATIC_LIB} ALIAS ${STATIC_LIB})
 
@@ -145,11 +178,12 @@ if(REDIS_PLUS_PLUS_BUILD_STATIC)
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${REDIS_PLUS_PLUS_SOURCE_DIR}>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${TLS_SUB_DIR}>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${CXX_UTILS_DIR}>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${PATTERNS_DIR}>
             $<INSTALL_INTERFACE:include>)
 
     if(hiredis_FOUND)
         target_include_directories(${STATIC_LIB} PUBLIC $<BUILD_INTERFACE:${hiredis_INCLUDE_DIRS}>)
-        target_link_libraries(${STATIC_LIB} PUBLIC ${REDIS_PLUS_PLUS_HIREDIS_LIBS})
+        target_link_libraries(${STATIC_LIB} PUBLIC ${REDIS_PLUS_PLUS_HIREDIS_LIBS_STATIC})
     else()
         target_include_directories(${STATIC_LIB} PUBLIC $<BUILD_INTERFACE:${HIREDIS_HEADER}>)
     endif()
@@ -167,7 +201,7 @@ if(REDIS_PLUS_PLUS_BUILD_STATIC)
         set_target_properties(${STATIC_LIB} PROPERTIES CXX_STANDARD ${REDIS_PLUS_PLUS_CXX_STANDARD})
         set_target_properties(${STATIC_LIB} PROPERTIES OUTPUT_NAME redis++_static)
     else()
-        target_compile_options(${STATIC_LIB} PRIVATE "-Wall" "-W" "-Werror")
+        target_compile_options(${STATIC_LIB} PRIVATE "-Wall" "-Wextra" "-Werror")
         set_target_properties(${STATIC_LIB} PROPERTIES OUTPUT_NAME redis++)
     endif()
 
@@ -191,13 +225,13 @@ if(REDIS_PLUS_PLUS_BUILD_SHARED)
 
     add_library(${SHARED_LIB} SHARED ${REDIS_PLUS_PLUS_SOURCES})
     add_library(redis++::${SHARED_LIB} ALIAS ${SHARED_LIB})
-    
     list(APPEND REDIS_PLUS_PLUS_TARGETS ${SHARED_LIB})
 
     target_include_directories(${SHARED_LIB} PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${REDIS_PLUS_PLUS_SOURCE_DIR}>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${TLS_SUB_DIR}>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${CXX_UTILS_DIR}>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${PATTERNS_DIR}>
             $<INSTALL_INTERFACE:include>)
 
     if(hiredis_FOUND)
@@ -222,7 +256,7 @@ if(REDIS_PLUS_PLUS_BUILD_SHARED)
         set_target_properties(${SHARED_LIB} PROPERTIES CXX_STANDARD ${REDIS_PLUS_PLUS_CXX_STANDARD})
         set_target_properties(${SHARED_LIB} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
     else()
-        target_compile_options(${SHARED_LIB} PRIVATE "-Wall" "-W" "-Werror")
+        target_compile_options(${SHARED_LIB} PRIVATE "-Wall" "-Wextra" "-Werror")
     endif()
 
     set_target_properties(${SHARED_LIB} PROPERTIES OUTPUT_NAME redis++)
@@ -234,6 +268,11 @@ endif()
 
 option(REDIS_PLUS_PLUS_BUILD_TEST "Build tests for redis++" ON)
 message(STATUS "redis-plus-plus build test: ${REDIS_PLUS_PLUS_BUILD_TEST}")
+
+option(REDIS_PLUS_PLUS_BUILD_ASYNC_TEST "Build async tests for redis++" OFF)
+if(REDIS_PLUS_PLUS_BUILD_ASYNC AND REDIS_PLUS_PLUS_BUILD_TEST)
+    set(REDIS_PLUS_PLUS_BUILD_ASYNC_TEST ON)
+endif()
 
 if(REDIS_PLUS_PLUS_BUILD_TEST)
     add_subdirectory(test)
@@ -262,7 +301,16 @@ if(NOT REDIS_PLUS_PLUS_BUILD_ASYNC)
     file(GLOB ASYNC_HEADERS "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_*.h" "${REDIS_PLUS_PLUS_SOURCE_DIR}/event_*.h")
     list(REMOVE_ITEM HEADERS ${ASYNC_HEADERS})
 endif()
+
+if(NOT REDIS_PLUS_PLUS_BUILD_CORO)
+    file(GLOB CORO_HEADERS "${REDIS_PLUS_PLUS_SOURCE_DIR}/co_*.h")
+    list(REMOVE_ITEM HEADERS ${CORO_HEADERS})
+endif()
+
 install(FILES ${HEADERS} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${HEADER_PATH})
+
+file(GLOB PATTERNS_HEADERS "${PATTERNS_DIR}/*.h*")
+install(FILES ${PATTERNS_HEADERS} DESTINATION ${CMAKE_INSTALL_PREFIX}/include/${HEADER_PATH}/patterns)
 
 include(CMakePackageConfigHelpers)
 
